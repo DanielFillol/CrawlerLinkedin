@@ -369,7 +369,7 @@ func goNextPage(ctx context.Context) bool {
 	sel := `button[aria-label="Avançar"], a[aria-label="Avançar"]`
 	if err := chromedp.Run(ctx,
 		chromedp.WaitVisible(sel, chromedp.ByQuery),
-		chromedp.ScrollIntoView(sel, chromedp.ByQuery),
+		//chromedp.ScrollIntoView(sel, chromedp.ByQuery),
 		chromedp.Click(sel, chromedp.ByQuery),
 		waitForResults(),
 	); err == nil {
