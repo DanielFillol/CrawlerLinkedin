@@ -90,6 +90,16 @@ func main() {
 	}
 	log.Println("🔎 Resultados carregados")
 
+	if err := applyFirstCurrentCompanyOption(bctx); err != nil {
+		log.Printf("aviso: não consegui aplicar o 1º 'Empresa atual': %v", err)
+	} else {
+		log.Println("✅ 'Empresa atual' → 1º item aplicado e resultados exibidos")
+	}
+
+	if err := clickTwoFilterButtons(bctx); err != nil {
+		log.Printf("warn: %v", err)
+	}
+
 	if *dumpHTML {
 		if err := dumpPageHTML(bctx, filepath.Join(*outDir, "results_page_1.html")); err != nil {
 			log.Printf("warn: dump html falhou: %v", err)
@@ -106,23 +116,18 @@ func main() {
 			log.Printf("aviso: erro capturando página %d: %v", page, err)
 		}
 
-		// >>> Ajustes pedidos: nome via URL quando vazio + não repetir título/região
 		for i := range items {
-			// normaliza nome vindo da UI (remove prefixos de status) e cai para URL se vazio
 			items[i].Name = strings.TrimSpace(strings.TrimPrefix(items[i].Name, "O status está off-line"))
 			if items[i].Name == "" {
 				if n := guessNameFromURL(items[i].URL); n != "" {
 					items[i].Name = n
 				}
 			}
-
-			// evita repetir título e região (se iguais, zera região)
 			if items[i].Title != "" && items[i].Location != "" &&
 				strings.EqualFold(items[i].Title, items[i].Location) {
 				items[i].Location = ""
 			}
 		}
-		// <<< fim dos ajustes
 
 		log.Printf("   • perfis capturados na página %d: %d", page, len(items))
 		all = append(all, items...)
@@ -160,7 +165,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 	const loginURL = "https://www.linkedin.com/checkpoint/lg/sign-in-another-account"
 	const feedURL = "https://www.linkedin.com/feed/"
 
-	// 1) abrir login e preencher
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(loginURL),
 		chromedp.WaitVisible(`#username`, chromedp.ByQuery),
@@ -170,7 +174,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 		return err
 	}
 
-	// 2) enviar (click + fallbacks)
 	clickTried := chromedp.Run(ctx,
 		chromedp.WaitVisible(`button[data-litms-control-urn="login-submit"], button[type="submit"]`, chromedp.ByQuery),
 		chromedp.ScrollIntoView(`button[data-litms-control-urn="login-submit"], button[type="submit"]`, chromedp.ByQuery),
@@ -182,7 +185,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 		_ = chromedp.Run(ctx, chromedp.Focus(`#password, input[name="session_password"]`), chromedp.KeyEvent("\r"))
 	}
 
-	// 3) captcha em iframe (challenge "antigo")
 	if isCaptcha(ctx) {
 		if headless {
 			return errors.New("captcha (iframe) detectado em modo headless; rode com --headless=false para resolver manualmente")
@@ -193,14 +195,11 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 		}
 	}
 
-	// 4) checkpoint challenge (página inteira)
 	if isCheckpointChallenge(ctx) {
 		if headless {
 			return errors.New("checkpoint challenge (página inteira) detectado em modo headless; rode com --headless=false para resolver manualmente")
 		}
 		log.Println("⏳ Challenge detectado. Tentando clicar 'Iniciar desafio' e aguardando você resolver… (até 5 min)")
-
-		// tenta iniciar o desafio (se botão estiver presente)
 		_ = chromedp.Run(ctx,
 			chromedp.ActionFunc(func(c context.Context) error {
 				var clicked bool
@@ -214,8 +213,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 			}),
 			chromedp.Sleep(1200*time.Millisecond),
 		)
-
-		// espera challenge sumir OU feed/search ficar visível
 		err := waitUntil(ctx, 5*time.Minute, `
       (()=>{
         const stillChallenge = (()=>{
@@ -226,10 +223,7 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
           const txt = (h2?.textContent||"") + " " + (btn?.textContent||"");
           return /Proteger a sua conta|Iniciar desafio/i.test(txt);
         })();
-
         if (stillChallenge) return false;
-
-        // sinal de que “saí” do challenge e estou logado
         if (document.querySelector('input[placeholder*="Pesquisar"], input[placeholder*="Search"]')) return true;
         if ((location.href||"").includes("/feed/")) return true;
         return false;
@@ -240,7 +234,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 		}
 	}
 
-	// 5) 2FA (quando aparece campo one-time code/pin)
 	if has2FA(ctx) {
 		log.Println("⏳ 2FA detectada. Insira o código. Aguardando 180s…")
 		if err := waitDisappear(ctx, 180*time.Second, `input[autocomplete="one-time-code"], input[name*="pin"]`); err != nil {
@@ -248,7 +241,6 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 		}
 	}
 
-	// 6) valida indo ao feed
 	return chromedp.Run(ctx,
 		chromedp.Navigate(feedURL),
 		chromedp.WaitReady(`body`, chromedp.ByQuery),
@@ -258,20 +250,15 @@ func loginLinkedIn(ctx context.Context, email, password string, headless bool) e
 func isCheckpointChallenge(ctx context.Context) bool {
 	var on bool
 	_ = chromedp.Run(ctx,
-		chromedp.EvaluateAsDevTools(`
-      (()=>{
+		chromedp.EvaluateAsDevTools(`(()=>{
         const href = location.href || "";
         if (href.includes("/checkpoint/challenge/")) return true;
-
-        // Heurística pela UI do desafio que você mostrou
         const h2 = document.querySelector('[data-theme="home.title"], h2.sc-1io4bok-0');
         const btn = document.querySelector('[data-theme="home.verifyButton"]');
         const txt = (h2?.textContent || "") + " " + (btn?.textContent || "");
         if (/Proteger a sua conta|Iniciar desafio/i.test(txt)) return true;
-
         return false;
-      })()
-    `, &on),
+      })()`, &on),
 	)
 	return on
 }
@@ -323,26 +310,25 @@ func waitDisappear(ctx context.Context, timeout time.Duration, css string) error
 // =============== Busca via URL ===============
 
 func runSearchViaURL(ctx context.Context, q string) error {
-	desktop := "https://www.linkedin.com/search/results/people/?keywords=" + url.QueryEscape(q)
-	mobile := "https://www.linkedin.com/m/search/results/people/?keywords=" + url.QueryEscape(q)
+	//if i want sao paulo: geoUrn=%5B%22105871508%22%5D
+	desktop := "https://www.linkedin.com/search/results/people/?keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
+	mobile := "https://www.linkedin.com/m/search/results/people/?keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
 
-	// tenta desktop
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(desktop),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		waitDOMComplete(),
 		chromedp.Sleep(500*time.Millisecond),
-		waitForResults(),
+		waitForCards(),
 	); err == nil {
 		return nil
 	}
 
-	// fallback: mobile
 	return chromedp.Run(ctx,
 		chromedp.Navigate(mobile),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(700*time.Millisecond),
-		waitForResults(),
+		waitForCards(),
 	)
 }
 
@@ -353,93 +339,222 @@ func waitDOMComplete() chromedp.Action {
     })`, nil)
 }
 
-func waitForResults() chromedp.Action {
-	// qualquer contêiner típico de resultados serve
-	sel := `main .search-results-container,
-            main ul.reusable-search__entity-result-list,
-            main .reusable-search__entity-result-list,
-            main [data-view-name="search-entity-result-universal-template"],
-            main [data-chameleon-result-urn]`
-	return chromedp.WaitVisible(sel, chromedp.ByQuery)
+func waitForCards() chromedp.Action {
+	js := `(async () => {
+	  const hasCards = () => {
+	    const sel = [
+	      "main [data-view-name='search-entity-result-universal-template'] a[href*='/in/']",
+	      "main [data-chameleon-result-urn] a[href*='/in/']",
+	      "div.search-results-container ul[role='list'] li a[href*='/in/']"
+	    ].join(", ");
+	    return document.querySelectorAll(sel).length > 0;
+	  };
+	  if (hasCards()) return true;
+	  return await new Promise(res => {
+	    const stop = () => { obs && obs.disconnect(); res(true); };
+	    const obs = new MutationObserver(() => { if (hasCards()) stop(); });
+	    obs.observe(document, {subtree:true, childList:true});
+	    setTimeout(() => { obs.disconnect(); res(hasCards()); }, 10000); // 10s hard cap
+	  });
+	})()`
+	return chromedp.EvaluateAsDevTools(js, nil)
+}
+
+func applyFirstCurrentCompanyOption(ctx context.Context) error {
+	return chromedp.Run(ctx,
+		// 1) abrir o chip "Empresa atual"
+		chromedp.WaitVisible(`#searchFilter_currentCompany`, chromedp.ByQuery),
+		chromedp.ScrollIntoView(`#searchFilter_currentCompany`, chromedp.ByQuery),
+		chromedp.Click(`#searchFilter_currentCompany`, chromedp.ByQuery),
+
+		// 2) dentro do popover controlado por aria-controls, clicar o 1º item e depois "Exibir resultados"
+		chromedp.ActionFunc(func(c context.Context) error {
+			var ok bool
+			js := `(()=>{
+				const trigger = document.querySelector('#searchFilter_currentCompany');
+				if(!trigger) return false;
+				const popId = trigger.getAttribute('aria-controls');
+				const pop = (popId && document.getElementById(popId)) || document.querySelector('.artdeco-hoverable-content--visible');
+				if(!pop) return false;
+
+				// 1º LI da lista de empresas
+				const firstLi = pop.querySelector('ul.search-reusables__collection-values-container > li');
+				if(!firstLi) return false;
+
+				// clicar o label (mais confiável)
+				const label = firstLi.querySelector('label') || firstLi;
+				label.scrollIntoView({behavior:'instant', block:'center'});
+				label.click();
+
+				// botão "Exibir resultados"
+				const applyBtn = Array.from(pop.querySelectorAll('button')).find(b =>
+					/Exibir resultados/i.test(b.textContent||'') ||
+					/Aplicar filtro/i.test(b.getAttribute('aria-label')||'')
+				);
+				if(applyBtn){
+					applyBtn.scrollIntoView({behavior:'instant', block:'center'});
+					applyBtn.click();
+					return true;
+				}
+				return false;
+			})()`
+			return chromedp.EvaluateAsDevTools(js, &ok).Do(c)
+		}),
+
+		// 3) aguardar recarregar a lista
+		chromedp.Sleep(600*time.Millisecond),
+		waitForCards(),
+	)
+}
+
+func clickTwoFilterButtons(ctx context.Context) error {
+	selectors := []string{
+		`#search-reusables__filters-bar > ul > li:nth-child(5) > div > fieldset > ul > li:nth-child(2) > button`,
+		`#search-reusables__filters-bar > ul > li:nth-child(3) > div > fieldset > ul > li:nth-child(3) > button`,
+	}
+
+	for i, sel := range selectors {
+		// Wait up to 5s for the element to become visible
+		waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if err := chromedp.Run(waitCtx,
+			chromedp.WaitVisible(sel, chromedp.ByQuery),
+		); err != nil {
+			cancel()
+			return fmt.Errorf("selector %d not visible within 5s: %s: %w", i+1, sel, err)
+		}
+		cancel()
+
+		// Scroll + click using the parent context
+		if err := chromedp.Run(ctx,
+			chromedp.Sleep(120*time.Millisecond),
+			chromedp.Click(sel, chromedp.ByQuery),
+		); err != nil {
+			return fmt.Errorf("failed clicking selector %d: %s: %w", i+1, sel, err)
+		}
+
+		// tiny pause between clicks
+		_ = chromedp.Run(ctx, chromedp.Sleep(250*time.Millisecond))
+	}
+
+	return nil
 }
 
 // =============== Paginação ===============
 
 func goNextPage(ctx context.Context) bool {
 	sel := `button[aria-label="Avançar"], a[aria-label="Avançar"]`
-	if err := chromedp.Run(ctx,
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := chromedp.Run(waitCtx,
 		chromedp.WaitVisible(sel, chromedp.ByQuery),
-		//chromedp.ScrollIntoView(sel, chromedp.ByQuery),
-		chromedp.Click(sel, chromedp.ByQuery),
-		waitForResults(),
-	); err == nil {
-		return true
+	); err != nil {
+		return false
 	}
-	return false
+	if err := chromedp.Run(ctx,
+		chromedp.Click(sel, chromedp.ByQuery),
+		waitForCards(),
+	); err != nil {
+		return false
+	}
+	return true
 }
 
 // =============== Coleta ===============
 
 func scrapeCurrentPage(ctx context.Context, sourceQuery string) ([]Profile, error) {
+	// 1) aguarda realmente existirem cards clicáveis
+	if err := chromedp.Run(ctx, waitForCards()); err != nil {
+		return nil, fmt.Errorf("timeout aguardando cards: %w", err)
+	}
+
+	// 2) dá uma passeada para materializar itens virtualizados
+	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
+		var _ignored bool
+		js := `(function(){
+		  let y = 0, i = 0;
+		  const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+		  const step = Math.max(400, Math.floor(window.innerHeight*0.8));
+		  const tick = () => {
+		    if (i++ > 8 || y > max) return;
+		    y += step;
+		    window.scrollTo(0, y);
+		    setTimeout(tick, 120);
+		  };
+		  tick();
+		  return true;
+		})()`
+		return chromedp.EvaluateAsDevTools(js, &_ignored).Do(c)
+	}), chromedp.Sleep(400*time.Millisecond))
+
+	// 3) coleta (UI nova + antiga)
 	js := `(() => {
 	  const clean = s => (s || '').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
 	  const getText = el => el ? clean(el.textContent || "") : "";
 
-	  const looksLikeCity = (txt) => {
-	    if (!txt) return false;
-	    if (txt.includes(',')) return true;
-	    return /s\u00e3o paulo|sp|rio de janeiro|rj|lisboa|porto|belo horizonte|curitiba|brasil|brazil|london|new york/i.test(txt);
-	  };
+	  // captura todos os "cards" possíveis
+	  let cards = Array.from(document.querySelectorAll(
+	    "main [data-view-name='search-entity-result-universal-template'], " +
+	    "main [data-chameleon-result-urn], " +
+	    "div.search-results-container ul[role='list'] li"
+	  ));
 
-	  let cards = Array.from(document.querySelectorAll('main ul.reusable-search__entity-result-list > li'));
-	  if (cards.length === 0) {
-	    cards = Array.from(document.querySelectorAll('main [data-view-name="search-entity-result-universal-template"], main [data-chameleon-result-urn]'));
-	  }
+	  // se pegou <li>, desce para o container real do card
+	  cards = cards.map(card => card.querySelector("[data-view-name='search-entity-result-universal-template'], [data-chameleon-result-urn]") || card);
 
 	  const out = [];
 	  const seen = new Set();
 
 	  for (const card of cards) {
-	    const isInsight = (el) => !!el.closest('.entity-result__insights, .reusable-search-simple-insight, .reusable-search-simple-insight__text-container');
+	    // evita links de "insights"/conexões em comum
+	    const isInsight = el => !!el.closest('.entity-result__insights, .reusable-search-simple-insight, .reusable-search-simple-insight__text-container');
+
+	 	// anchor do perfil
 	    let a = null;
-	    const candidates = card.querySelectorAll('a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]');
+	    const candidates = card.querySelectorAll("a[data-test-app-aware-link][href*='/in/'], a[href*='/in/']");
 	    for (const cand of candidates) { if (!isInsight(cand)) { a = cand; break; } }
 	    if (!a) continue;
 
+	    // URL canônica
 	    let href = a.getAttribute('href') || '';
 	    try { const u = new URL(href, location.origin); href = u.origin + u.pathname; } catch {}
 	    if (!href.includes('/in/')) continue;
 	    if (seen.has(href)) continue;
 	    seen.add(href);
 
-	    let name = "";
-	    const hidden = a.querySelector('span[aria-hidden="true"]');
-	    name = getText(hidden) || getText(a);
-	    name = name.replace(/^O status est\u00e1 off-line/i, '').trim();
+	    // Nome (o texto do próprio <a> geralmente já resolve)
+	    let name = getText(a.querySelector('span[aria-hidden="true"]')) || getText(a);
+	    name = name.replace(/^O status está off-line/i, '').trim();
 
+	    // Título/cargo: variações de containers antigos/novos
 	    let title = "";
 	    for (const sel of [
-	      '.entity-result__primary-subtitle',
-	      '.artdeco-entity-lockup__subtitle',
-	      '.linked-area div[dir="ltr"]:nth-of-type(2)',
-	      '.t-14.t-black.t-normal'
+	      ".entity-result__primary-subtitle",
+	      ".artdeco-entity-lockup__subtitle",
+	      ".linked-area div[dir='ltr']:nth-of-type(2)",
+	      ".t-14.t-black.t-normal",
+	      "[class*='subtitle']" // UI nova ofuscada costuma manter *subtitle*
 	    ]) {
 	      const el = card.querySelector(sel);
 	      if (getText(el)) { title = getText(el); break; }
 	    }
 
+	    // Localidade (pula textos como "conexão de Xº grau")
 	    let location = "";
-	    const locNodes = Array.from(card.querySelectorAll('div.t-14.t-normal, .reusable-search-secondary-subtitle, .entity-result__secondary-subtitle'));
+	    const locNodes = Array.from(card.querySelectorAll(
+	      "div.t-14.t-normal, .reusable-search-secondary-subtitle, .entity-result__secondary-subtitle, [class*='secondary-subtitle']"
+	    ));
 	    for (const el of locNodes) {
 	      const txt = getText(el);
-	      if (!txt) continue;
-	      if (/conex\u00e3o.*grau/i.test(txt)) continue;
-	      if (looksLikeCity(txt)) { location = txt; break; }
+	      if (!txt || /conex(ão|ao).*(grau|degree)/i.test(txt)) continue;
+	      if (/,|\b(são paulo|sp|rio de janeiro|rj|lisboa|porto|belo horizonte|curitiba|brasil|brazil|london|new york)\b/i.test(txt)) {
+	        location = txt; break;
+	      }
 	    }
 
+	    // Empresa / resumo
 	    let role = "";
 	    let company = "";
-	    const summary = card.querySelector('p.entity-result__summary--2-lines');
+	    const summary = card.querySelector("p.entity-result__summary--2-lines");
 	    if (summary) {
 	      const txt = getText(summary);
 	      role = txt;
@@ -447,7 +562,7 @@ func scrapeCurrentPage(ctx context.Context, sourceQuery string) ([]Profile, erro
 	      if (mCompany) company = clean(mCompany[1]);
 	    }
 	    if (!company) {
-	      const c2 = card.querySelector('.entity-result__secondary-subtitle, .artdeco-entity-lockup__caption');
+	      const c2 = card.querySelector(".entity-result__secondary-subtitle, .artdeco-entity-lockup__caption, [class*='secondary-subtitle']");
 	      if (getText(c2)) company = getText(c2);
 	    }
 
@@ -462,12 +577,12 @@ func scrapeCurrentPage(ctx context.Context, sourceQuery string) ([]Profile, erro
 		return nil, fmt.Errorf("falha extraindo resultados: %w", err)
 	}
 	if len(rows) == 0 {
-		return nil, errors.New("nenhum resultado encontrado na página (UI mudou ou bloqueio ativo)")
+		return nil, errors.New("nenhum resultado encontrado na página (UI nova não materializou; tente --headless=false e role a página; verifique bloqueio)")
 	}
 
 	now := time.Now()
-	out := make([]Profile, 0, len(rows))
 	seen := map[string]bool{}
+	out := make([]Profile, 0, len(rows))
 	for _, r := range rows {
 		u := clean(r["url"])
 		if u == "" || seen[u] {
@@ -476,31 +591,20 @@ func scrapeCurrentPage(ctx context.Context, sourceQuery string) ([]Profile, erro
 		seen[u] = true
 
 		name := clean(r["name"])
-		title := clean(r["title"])
-		company := clean(r["company"])
-		location := clean(r["location"])
-		role := clean(r["role"])
-
-		// nome via URL quando vazio
 		if name == "" {
 			if n := guessNameFromURL(u); n != "" {
 				name = n
 			}
 		}
-		// não repetir título/região
+		title := clean(r["title"])
+		location := clean(r["location"])
 		if title != "" && location != "" && strings.EqualFold(title, location) {
 			location = ""
 		}
 
 		out = append(out, Profile{
-			Name:        name,
-			Title:       title,
-			Company:     company,
-			Location:    location,
-			Role:        role,
-			URL:         u,
-			SourceQuery: sourceQuery,
-			CapturedAt:  now,
+			Name: name, Title: title, Company: clean(r["company"]), Location: location,
+			Role: clean(r["role"]), URL: u, SourceQuery: sourceQuery, CapturedAt: now,
 		})
 	}
 	return out, nil
@@ -513,8 +617,7 @@ func sendConnectInvites(ctx context.Context, max int) int {
 	for sent < max {
 		var clicked bool
 		err := chromedp.Run(ctx,
-			chromedp.EvaluateAsDevTools(`
-			(() => {
+			chromedp.EvaluateAsDevTools(`(() => {
 				const candidates = Array.from(document.querySelectorAll('button, a')).filter(b => {
 					const t = (b.innerText || '').toLowerCase();
 					return t.includes('conectar') || t.includes('connect');
@@ -526,8 +629,7 @@ func sendConnectInvites(ctx context.Context, max int) int {
 					return true;
 				}
 				return false;
-			})()
-			`, &clicked),
+			})()`, &clicked),
 		)
 		if err != nil || !clicked {
 			break
@@ -635,8 +737,6 @@ func dumpPageHTML(ctx context.Context, path string) error {
 	return os.WriteFile(path, []byte(html), 0o644)
 }
 
-// --------- Novos helpers para as duas regras ---------
-
 func guessNameFromURL(raw string) string {
 	if raw == "" {
 		return ""
@@ -645,9 +745,8 @@ func guessNameFromURL(raw string) string {
 	if err != nil {
 		return ""
 	}
-	seg := u.Path // ex: /in/daniela-mendes-659a2952
-	idx := strings.Index(seg, "/in/")
-	if idx >= 0 {
+	seg := u.Path
+	if idx := strings.Index(seg, "/in/"); idx >= 0 {
 		seg = seg[idx+len("/in/"):]
 	}
 	if seg == "" {
@@ -663,7 +762,6 @@ func guessNameFromURL(raw string) string {
 		if p == "" {
 			continue
 		}
-		// ignora tokens com dígitos (ids do linkedin) tipo 659a2952
 		if hasDigit(p) {
 			continue
 		}
@@ -686,7 +784,6 @@ func toTitleCase(s string) string {
 	if s == "" {
 		return s
 	}
-	// mantém preposições comuns minúsculas quando no meio
 	preps := map[string]bool{"de": true, "da": true, "do": true, "dos": true, "das": true, "e": true}
 	words := strings.Fields(s)
 	for i, w := range words {
