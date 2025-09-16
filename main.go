@@ -96,9 +96,9 @@ func main() {
 		log.Println("✅ 'Empresa atual' → 1º item aplicado e resultados exibidos")
 	}
 
-	if err := clickTwoFilterButtons(bctx); err != nil {
-		log.Printf("warn: %v", err)
-	}
+	//if err := clickTwoFilterButtons(bctx); err != nil {
+	//	log.Printf("warn: %v", err)
+	//}
 
 	if *dumpHTML {
 		if err := dumpPageHTML(bctx, filepath.Join(*outDir, "results_page_1.html")); err != nil {
@@ -311,15 +311,17 @@ func waitDisappear(ctx context.Context, timeout time.Duration, css string) error
 
 func runSearchViaURL(ctx context.Context, q string) error {
 	//if i want sao paulo: geoUrn=%5B%22105871508%22%5D
-	desktop := "https://www.linkedin.com/search/results/people/?keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
-	mobile := "https://www.linkedin.com/m/search/results/people/?keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
+	desktop := "https://www.linkedin.com/search/results/people/?geoUrn=%5B%22105871508%22%5D&keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
+	mobile := "https://www.linkedin.com/m/search/results/people/?geoUrn=%5B%22105871508%22%5D&keywords=" + url.QueryEscape(q) + "&origin=FACETED_SEARCH"
 
+	// tenta desktop
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(desktop),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		waitDOMComplete(),
 		chromedp.Sleep(500*time.Millisecond),
-		waitForCards(),
+		//waitForCards(),
+		waitForResults(),
 	); err == nil {
 		return nil
 	}
@@ -328,7 +330,8 @@ func runSearchViaURL(ctx context.Context, q string) error {
 		chromedp.Navigate(mobile),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(700*time.Millisecond),
-		waitForCards(),
+		//waitForCards(),
+		waitForResults(),
 	)
 }
 
@@ -439,6 +442,16 @@ func clickTwoFilterButtons(ctx context.Context) error {
 	return nil
 }
 
+func waitForResults() chromedp.Action {
+	// qualquer contêiner típico de resultados serve
+	sel := `main .search-results-container,
+            main ul.reusable-search__entity-result-list,
+            main .reusable-search__entity-result-list,
+            main [data-view-name="search-entity-result-universal-template"],
+            main [data-chameleon-result-urn]`
+	return chromedp.WaitVisible(sel, chromedp.ByQuery)
+}
+
 // =============== Paginação ===============
 
 func goNextPage(ctx context.Context) bool {
@@ -462,6 +475,132 @@ func goNextPage(ctx context.Context) bool {
 // =============== Coleta ===============
 
 func scrapeCurrentPage(ctx context.Context, sourceQuery string) ([]Profile, error) {
+	js := `(() => {
+	  const clean = s => (s || '').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
+	  const getText = el => el ? clean(el.textContent || "") : "";
+
+	  const looksLikeCity = (txt) => {
+	    if (!txt) return false;
+	    if (txt.includes(',')) return true;
+	    return /s\u00e3o paulo|sp|rio de janeiro|rj|lisboa|porto|belo horizonte|curitiba|brasil|brazil|london|new york/i.test(txt);
+	  };
+
+	  let cards = Array.from(document.querySelectorAll('main ul.reusable-search__entity-result-list > li'));
+	  if (cards.length === 0) {
+	    cards = Array.from(document.querySelectorAll('main [data-view-name="search-entity-result-universal-template"], main [data-chameleon-result-urn]'));
+	  }
+
+	  const out = [];
+	  const seen = new Set();
+
+	  for (const card of cards) {
+	    const isInsight = (el) => !!el.closest('.entity-result__insights, .reusable-search-simple-insight, .reusable-search-simple-insight__text-container');
+	    let a = null;
+	    const candidates = card.querySelectorAll('a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]');
+	    for (const cand of candidates) { if (!isInsight(cand)) { a = cand; break; } }
+	    if (!a) continue;
+
+	    let href = a.getAttribute('href') || '';
+	    try { const u = new URL(href, location.origin); href = u.origin + u.pathname; } catch {}
+	    if (!href.includes('/in/')) continue;
+	    if (seen.has(href)) continue;
+	    seen.add(href);
+
+	    let name = "";
+	    const hidden = a.querySelector('span[aria-hidden="true"]');
+	    name = getText(hidden) || getText(a);
+	    name = name.replace(/^O status est\u00e1 off-line/i, '').trim();
+
+	    let title = "";
+	    for (const sel of [
+	      '.entity-result__primary-subtitle',
+	      '.artdeco-entity-lockup__subtitle',
+	      '.linked-area div[dir="ltr"]:nth-of-type(2)',
+	      '.t-14.t-black.t-normal'
+	    ]) {
+	      const el = card.querySelector(sel);
+	      if (getText(el)) { title = getText(el); break; }
+	    }
+
+	    let location = "";
+	    const locNodes = Array.from(card.querySelectorAll('div.t-14.t-normal, .reusable-search-secondary-subtitle, .entity-result__secondary-subtitle'));
+	    for (const el of locNodes) {
+	      const txt = getText(el);
+	      if (!txt) continue;
+	      if (/conex\u00e3o.*grau/i.test(txt)) continue;
+	      if (looksLikeCity(txt)) { location = txt; break; }
+	    }
+
+	    let role = "";
+	    let company = "";
+	    const summary = card.querySelector('p.entity-result__summary--2-lines');
+	    if (summary) {
+	      const txt = getText(summary);
+	      role = txt;
+	      const mCompany = txt.match(/\b(?:em|do|da|no|na)\s+([^|–-]+)$/i);
+	      if (mCompany) company = clean(mCompany[1]);
+	    }
+	    if (!company) {
+	      const c2 = card.querySelector('.entity-result__secondary-subtitle, .artdeco-entity-lockup__caption');
+	      if (getText(c2)) company = getText(c2);
+	    }
+
+	    out.push({ name, title, company, location, role, url: href });
+	  }
+
+	  return out;
+	})()`
+
+	var rows []map[string]string
+	if err := chromedp.Run(ctx, chromedp.EvaluateAsDevTools(js, &rows)); err != nil {
+		return nil, fmt.Errorf("falha extraindo resultados: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("nenhum resultado encontrado na página (UI mudou ou bloqueio ativo)")
+	}
+
+	now := time.Now()
+	out := make([]Profile, 0, len(rows))
+	seen := map[string]bool{}
+	for _, r := range rows {
+		u := clean(r["url"])
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+
+		name := clean(r["name"])
+		title := clean(r["title"])
+		company := clean(r["company"])
+		location := clean(r["location"])
+		role := clean(r["role"])
+
+		// nome via URL quando vazio
+		if name == "" {
+			if n := guessNameFromURL(u); n != "" {
+				name = n
+			}
+		}
+		// não repetir título/região
+		if title != "" && location != "" && strings.EqualFold(title, location) {
+			location = ""
+		}
+
+		out = append(out, Profile{
+			Name:        name,
+			Title:       title,
+			Company:     company,
+			Location:    location,
+			Role:        role,
+			URL:         u,
+			SourceQuery: sourceQuery,
+			CapturedAt:  now,
+		})
+	}
+	return out, nil
+}
+
+func scrapeCurrentPage2(ctx context.Context, sourceQuery string) ([]Profile, error) {
 	// 1) aguarda realmente existirem cards clicáveis
 	if err := chromedp.Run(ctx, waitForCards()); err != nil {
 		return nil, fmt.Errorf("timeout aguardando cards: %w", err)
